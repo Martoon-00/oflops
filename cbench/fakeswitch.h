@@ -7,7 +7,7 @@
 
 #define NUM_BUFFER_IDS 100000
 
-enum test_mode 
+enum test_mode
 {
     MODE_LATENCY, MODE_THROUGHPUT
 };
@@ -18,8 +18,8 @@ enum handshake_status {
     READY_TO_SEND = 99,
     WAITING = 101
 };
-    
-struct fakeswitch 
+
+struct fakeswitch
 {
     int id;                             // switch number
     int debug;                          // do we print debug msgs?
@@ -39,15 +39,17 @@ struct fakeswitch
     int current_mac_address;
     int learn_dstmac;
     int current_buffer_id;
+    int packets_to_submit;
+    int packets_to_receive;
 };
 
 /*** Initialize an already allocated fakeswitch
- * Fill in all of the parameters, 
+ * Fill in all of the parameters,
  *  exchange OFP_HELLO, block waiting on features_request
  *  and send features reply
  * @param fs        Pointer to a fakeswitch
  * @param dpid      DPID
- * @param sock      A non-blocking socket already connected to 
+ * @param sock      A non-blocking socket already connected to
  *                          the controller (will be non-blocking on return)
  * @param bufsize   The initial in and out buffer size
  * @param mode      Should we test throughput or latency?
@@ -75,10 +77,14 @@ void fakeswitch_set_pollfd(struct fakeswitch *fs, struct pollfd *pfd);
  */
 void fakeswitch_handle_io(struct fakeswitch *fs, const struct pollfd *pfd);
 
-/**** Get and reset count 
+/**** Get and reset count
  * @param fs    Pointer to initialized fakeswitch
  * @return      Number of flow_mod responses since last call
  */
 int fakeswitch_get_count(struct fakeswitch *fs);
+
+int fakeswitch_packet_submitted(struct fakeswitch *fs);
+
+void fakeswitch_reset_packets(struct fakeswitch *fs, int init);
 
 #endif

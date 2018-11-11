@@ -71,7 +71,9 @@ void fakeswitch_init(struct fakeswitch *fs, int dpid, int sock, int bufsize, int
     fs->xid = 1;
     fs->learn_dstmac = learn_dstmac;
     fs->current_buffer_id = 1;
-  
+    fs->packets_to_submit = -1;
+    fs->packets_to_receive = -1;
+
     ofph.version = OFP_VERSION;
     ofph.type = OFPT_HELLO;
     ofph.length = htons(sizeof(ofph));
@@ -88,13 +90,13 @@ void fakeswitch_learn_dstmac(struct fakeswitch *fs)
 {
     // thanks wireshark
     char gratuitous_arp_reply [] = {
-        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x0c, 
-        0x29, 0x1a, 0x29, 0x1a, 0x08, 0x06, 0x00, 0x01, 
-        0x08, 0x00, 0x06, 0x04, 0x00, 0x02, 0x00, 0x0c, 
-        0x29, 0x1a, 0x29, 0x1a, 0x7f, 0x00, 0x00, 0x01, 
-        0x00, 0x0c, 0x29, 0x1a, 0x29, 0x1a, 0x7f, 0x00, 
+        0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0x00, 0x0c,
+        0x29, 0x1a, 0x29, 0x1a, 0x08, 0x06, 0x00, 0x01,
+        0x08, 0x00, 0x06, 0x04, 0x00, 0x02, 0x00, 0x0c,
+        0x29, 0x1a, 0x29, 0x1a, 0x7f, 0x00, 0x00, 0x01,
+        0x00, 0x0c, 0x29, 0x1a, 0x29, 0x1a, 0x7f, 0x00,
         0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     };
 
@@ -166,7 +168,7 @@ int fakeswitch_get_count(struct fakeswitch *fs)
             ofph = msgbuf_peek(fs->inbuf);
             msglen = ntohs(ofph->length);
             if(count < msglen)
-                break;     // msg not all there yet; 
+                break;     // msg not all there yet;
             msgbuf_pull(fs->inbuf, NULL, ntohs(ofph->length));
             count -= msglen;
         }
@@ -176,7 +178,7 @@ int fakeswitch_get_count(struct fakeswitch *fs)
 
 /***********************************************************************/
 static int parse_set_config(struct ofp_header * msg) {
-	struct ofp_switch_config * sc; 
+	struct ofp_switch_config * sc;
 	assert(msg->type == OFPT_SET_CONFIG);
 	sc = (struct ofp_switch_config *) msg;
 	memcpy(&Switch_config, sc, sizeof(struct ofp_switch_config));
@@ -229,9 +231,9 @@ static int              make_features_reply(int id, int xid, char * buf, int buf
     return sizeof(fake);
 }
 /***********************************************************************/
-static int      make_stats_desc_reply(struct ofp_stats_request * req, 
+static int      make_stats_desc_reply(struct ofp_stats_request * req,
         char * buf, int buflen) {
-    static struct ofp_desc_stats cbench_desc = { 
+    static struct ofp_desc_stats cbench_desc = {
         .mfr_desc = "Cbench - controller I/O benchmark",
         .hw_desc  = "this is actually software...",
         .sw_desc  = "version " VERSION,
@@ -239,7 +241,7 @@ static int      make_stats_desc_reply(struct ofp_stats_request * req,
         .dp_desc  = "none"
     };
     struct ofp_stats_reply * reply;
-    int len = sizeof(struct ofp_stats_reply) + 
+    int len = sizeof(struct ofp_stats_reply) +
                 sizeof(struct ofp_desc_stats);
     assert(BUFLEN > len);
     assert(ntohs(req->type) == OFPST_DESC);
@@ -269,7 +271,7 @@ static int make_vendor_reply(int xid, char * buf, int buflen)
 }
 /***********************************************************************
  *  return 1 if the embedded packet in the packet_out is lldp
- * 
+ *
  */
 
 #ifndef ETHERTYPE_LLDP
@@ -285,7 +287,7 @@ static int packet_out_is_lldp(struct ofp_packet_out * po){
 		ethernet = (struct ether_header *) ((char *) ethernet) +4;
 		ethertype = ntohs(ethernet->ether_type);
 	}
-	
+
 	return ethertype == ETHERTYPE_LLDP;
 }
 
@@ -325,7 +327,7 @@ void fakeswitch_change_status_now (struct fakeswitch *fs, int new_status) {
         fs->count = 0;
         fs->probe_state = 0;
     }
-        
+
 }
 
 void fakeswitch_change_status(struct fakeswitch *fs, int new_status) {
@@ -343,6 +345,26 @@ void fakeswitch_change_status(struct fakeswitch *fs, int new_status) {
 
 }
 
+int fakeswitch_packet_submitted(struct fakeswitch *fs) {
+    if (fs->packets_to_submit > 0){
+        fs->packets_to_submit--;
+        return 1;
+    }
+    return 0;
+}
+
+int fakeswitch_packet_received(struct fakeswitch *fs) {
+    if (fs->packets_to_receive > 0){
+        fs->packets_to_receive--;
+        return 1;
+    }
+    return 0;
+}
+
+void fakeswitch_reset_packets(struct fakeswitch *fs, int init) {
+    fs->packets_to_submit = init;
+    fs->packets_to_receive = init;
+}
 
 /***********************************************************************/
 void fakeswitch_handle_read(struct fakeswitch *fs)
@@ -376,19 +398,21 @@ void fakeswitch_handle_read(struct fakeswitch *fs)
             struct ofp_stats_request * stats_req;
             case OFPT_PACKET_OUT:
                 po = (struct ofp_packet_out *) ofph;
-                if ( fs->switch_status == READY_TO_SEND && ! packet_out_is_lldp(po)) { 
+                if ( fs->switch_status == READY_TO_SEND && ! packet_out_is_lldp(po)) {
                     // assume this is in response to what we sent
                     fs->count++;        // got response to what we went
                     fs->probe_state--;
+                    fakeswitch_packet_received(fs);
                 }
                 break;
             case OFPT_FLOW_MOD:
                 fm = (struct ofp_flow_mod *) ofph;
-                if(fs->switch_status == READY_TO_SEND && (fm->command == htons(OFPFC_ADD) || 
+                if(fs->switch_status == READY_TO_SEND && (fm->command == htons(OFPFC_ADD) ||
                         fm->command == htons(OFPFC_MODIFY_STRICT)))
                 {
                     fs->count++;        // got response to what we went
                     fs->probe_state--;
+                    fakeswitch_packet_received(fs);
                 }
                 break;
             case OFPT_FEATURES_REQUEST:
@@ -410,8 +434,8 @@ void fakeswitch_handle_read(struct fakeswitch *fs)
                 debug_msg(fs, "got get_config_request");
                 count = make_config_reply(ofph->xid, buf, BUFLEN);
                 msgbuf_push(fs->outbuf, buf, count);
-		if ((fs->mode == MODE_LATENCY)  && ( fs->probe_state == 1 )) {     
-		    fs->probe_state = 0;       // restart probe state b/c some 
+		if ((fs->mode == MODE_LATENCY)  && ( fs->probe_state == 1 )) {
+		    fs->probe_state = 0;       // restart probe state b/c some
 					       // controllers block on config
                 	debug_msg(fs, "reset probe state b/c of get_config_reply");
 		}
@@ -452,8 +476,8 @@ void fakeswitch_handle_read(struct fakeswitch *fs)
                     count = make_stats_desc_reply(stats_req, buf, BUFLEN);
                     msgbuf_push(fs->outbuf, buf, count);
                     debug_msg(fs, "sent description stats_reply");
-                    if ((fs->mode == MODE_LATENCY)  && ( fs->probe_state == 1 )) {     
-                        fs->probe_state = 0;       // restart probe state b/c some 
+                    if ((fs->mode == MODE_LATENCY)  && ( fs->probe_state == 1 )) {
+                        fs->probe_state = 0;       // restart probe state b/c some
                                        // controllers block on config
                                 debug_msg(fs, "reset probe state b/c of desc_stats_request");
                     }
@@ -461,7 +485,7 @@ void fakeswitch_handle_read(struct fakeswitch *fs)
                     debug_msg(fs, "Silently ignoring non-desc stats_request msg\n");
                 }
                 break;
-            default: 
+            default:
     //            if(fs->debug)
                     fprintf(stderr, "Ignoring OpenFlow message type %d\n", ofph->type);
         };
@@ -481,17 +505,20 @@ static void fakeswitch_handle_write(struct fakeswitch *fs)
     int send_count = 0 ;
     int throughput_buffer = BUFLEN;
     int i;
-    if( fs->switch_status == READY_TO_SEND) 
+    if( fs->switch_status == READY_TO_SEND)
     {
-        if ((fs->mode == MODE_LATENCY)  && ( fs->probe_state == 0 ))      
+        if ((fs->mode == MODE_LATENCY)  && ( fs->probe_state == 0 ))
             send_count = 1;                 // just send one packet
-        else if ((fs->mode == MODE_THROUGHPUT) && 
+        else if ((fs->mode == MODE_THROUGHPUT) &&
                 (msgbuf_count_buffered(fs->outbuf) < throughput_buffer))  // keep buffer full
             send_count = (throughput_buffer - msgbuf_count_buffered(fs->outbuf)) / fs->probe_size;
         for (i = 0; i < send_count; i++)
         {
             // queue up packet
-            
+            int cont = fakeswitch_packet_submitted(fs);
+            if (!cont)
+                break;
+
             fs->probe_state++;
             // TODO come back and remove this copy
             count = make_packet_in(fs->id, fs->xid++, fs->current_buffer_id, buf, BUFLEN, fs->current_mac_address);
@@ -500,7 +527,7 @@ static void fakeswitch_handle_write(struct fakeswitch *fs)
             msgbuf_push(fs->outbuf, buf, count);
             debug_msg(fs, "send message %d", i);
         }
-    } else if( fs->switch_status == WAITING) 
+    } else if( fs->switch_status == WAITING)
     {
         struct timeval now;
         gettimeofday(&now, NULL);
@@ -509,7 +536,7 @@ static void fakeswitch_handle_write(struct fakeswitch *fs)
             fakeswitch_change_status_now(fs, fs->next_status);
             debug_msg(fs, " delay is over: switching to state %d", fs->next_status);
         }
-    } else if (  fs->switch_status == LEARN_DSTMAC) 
+    } else if (  fs->switch_status == LEARN_DSTMAC)
     {
         // we should learn the dst mac addresses
         fakeswitch_learn_dstmac(fs);

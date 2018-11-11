@@ -41,6 +41,7 @@ struct myargs my_options[] = {
     {"warmup",  'w', "loops to be disregarded on test start (warmup)", MYARGS_INTEGER, {.integer = 1}},
     {"cooldown",  'C', "loops to be disregarded at test end (cooldown)", MYARGS_INTEGER, {.integer = 0}},
     {"delay",  'D', "delay starting testing after features_reply is received (in ms)", MYARGS_INTEGER, {.integer = 0}},
+    {"packets",  'P', "number of packets all switches should process until stop", MYARGS_INTEGER, {.integer = 1000000}},
     {"connect-delay",  'i', "delay between groups of switches connecting to the controller (in ms)", MYARGS_INTEGER, {.integer = 0}},
     {"connect-group-size",  'I', "number of switches in a connection delay group", MYARGS_INTEGER, {.integer = 1}},
     {"learn-dst-macs",  'L', "send gratuitious ARP replies to learn destination macs before testing", MYARGS_FLAG, {.flag = 1}},
@@ -70,13 +71,22 @@ double run_test(int n_fakeswitches, struct fakeswitch * fakeswitches, int mstest
         timersub(&now, &then, &diff);
         if( (1000* diff.tv_sec  + (float)diff.tv_usec/1000)> total_wait)
             break;
+
         for(i = 0; i< n_fakeswitches; i++)
             fakeswitch_set_pollfd(&fakeswitches[i], &pollfds[i]);
 
         poll(pollfds, n_fakeswitches, 1000);      // block until something is ready or 100ms passes
 
-        for(i = 0; i< n_fakeswitches; i++)
+        int any_processed = 0;
+        for(i = 0; i< n_fakeswitches; i++) {
+            if (fakeswitches[i].packets_to_receive == 0)
+                continue;
+            any_processed = 1;
             fakeswitch_handle_io(&fakeswitches[i], &pollfds[i]);
+        }
+
+        if (!any_processed)
+            break;
     }
     tNow = now.tv_sec;
     tmNow = localtime(&tNow);
@@ -88,10 +98,11 @@ double run_test(int n_fakeswitches, struct fakeswitch * fakeswitches, int mstest
         printf("%d  ", count);
         sum += count;
     }
-    passed = 1000 * diff.tv_sec + (double)diff.tv_usec/1000;   
+    passed = 1000 * diff.tv_sec + (double)diff.tv_usec/1000;
     passed -= delay;        // don't count the time we intentionally delayed
     sum /= passed;  // is now per ms
     printf(" total = %lf per ms \n", sum);
+    printf("Passed %ld.%06ld / packets %d\n", diff.tv_sec, diff.tv_usec, (int) (sum * passed));
     free(pollfds);
     return sum;
 }
@@ -126,7 +137,7 @@ int timeout_connect(int fd, const char * hostname, int port, int mstimeout) {
 			freeaddrinfo(res);
 		return -1;
 	}
-	
+
 
 
 	// set non blocking
@@ -143,14 +154,14 @@ int timeout_connect(int fd, const char * hostname, int port, int mstimeout) {
 	FD_ZERO(&fds);
 	FD_SET(fd, &fds);
 
-	if(mstimeout >= 0) 
+	if(mstimeout >= 0)
 	{
 		tv.tv_sec = mstimeout / 1000;
 		tv.tv_usec = (mstimeout % 1000) * 1000;
 
 		errno = 0;
 
-		if(connect(fd, res->ai_addr, res->ai_addrlen) < 0) 
+		if(connect(fd, res->ai_addr, res->ai_addrlen) < 0)
 		{
 			if((errno != EWOULDBLOCK) && (errno != EINPROGRESS))
 			{
@@ -163,7 +174,7 @@ int timeout_connect(int fd, const char * hostname, int port, int mstimeout) {
 	}
 	freeaddrinfo(res);
 
-	if(ret != 1) 
+	if(ret != 1)
 	{
 		if(ret == 0)
 			return -1;
@@ -252,6 +263,7 @@ int main(int argc, char * argv[])
     int     warmup = myargs_get_default_integer(my_options, "warmup");
     int     cooldown = myargs_get_default_integer(my_options, "cooldown");
     int     delay = myargs_get_default_integer(my_options, "delay");
+    int     packets_to_process = myargs_get_default_integer(my_options, "packets");
     int     connect_delay = myargs_get_default_integer(my_options, "connect-delay");
     int     connect_group_size = myargs_get_default_integer(my_options, "connect-group-size");
     int     learn_dst_macs = myargs_get_default_flag(my_options, "learn-dst-macs");
@@ -261,7 +273,7 @@ int main(int argc, char * argv[])
 
     const struct option * long_opts = myargs_to_long(my_options);
     char * short_opts = myargs_to_short(my_options);
-    
+
     /* parse args here */
     while(1)
     {
@@ -270,15 +282,15 @@ int main(int argc, char * argv[])
         c = getopt_long(argc, argv, short_opts, long_opts, &option_index);
         if (c == -1)
             break;
-        switch (c) 
+        switch (c)
         {
-            case 'c' :  
+            case 'c' :
                 controller_hostname = strdup(optarg);
                 break;
             case 'd':
                 debug = 1;
                 break;
-            case 'h': 
+            case 'h':
                 myargs_usage(my_options, PROG_TITLE, "help message", NULL, 1);
                 break;
             case 'L':
@@ -287,35 +299,38 @@ int main(int argc, char * argv[])
                 else
                     learn_dst_macs = 1;
                 break;
-            case 'l': 
+            case 'l':
                 tests_per_loop = atoi(optarg);
                 break;
             case 'M':
                 total_mac_addresses = atoi(optarg);
                 break;
-            case 'm': 
+            case 'm':
                 mstestlen = atoi(optarg);
                 break;
             case 'r':
                 should_test_range = 1;
                 break;
-            case 'p' : 
+            case 'p' :
                 controller_port = atoi(optarg);
                 break;
-            case 's': 
+            case 's':
                 n_fakeswitches = atoi(optarg);
                 break;
-            case 't': 
+            case 't':
                 mode = MODE_THROUGHPUT;
                 break;
-            case 'w': 
+            case 'w':
                 warmup = atoi(optarg);
                 break;
-            case 'C': 
+            case 'C':
                 cooldown = atoi(optarg);
                 break;
             case 'D':
                 delay = atoi(optarg);
+                break;
+            case 'P':
+                packets_to_process = atoi(optarg);
                 break;
             case 'i':
                 connect_delay = atoi(optarg);
@@ -326,7 +341,7 @@ int main(int argc, char * argv[])
             case 'o':
                 dpid_offset = atoi(optarg);
                 break;
-            default: 
+            default:
                 myargs_usage(my_options, PROG_TITLE, "help message", NULL, 1);
         }
     }
@@ -343,6 +358,7 @@ int main(int argc, char * argv[])
                 "   with %d unique source MACs per switch\n"
                 "   %s destination mac addresses before the test\n"
                 "   starting test with %d ms delay after features_reply\n"
+                "   stopping when %d packets processed\n"
                 "   ignoring first %d \"warmup\" and last %d \"cooldown\" loops\n"
                 "   connection delay of %dms per %d switch(es)\n"
                 "   debugging info is %s\n",
@@ -357,6 +373,7 @@ int main(int argc, char * argv[])
                 total_mac_addresses,
                 learn_dst_macs ? "learning" : "NOT learning",
                 delay,
+                packets_to_process,
                 warmup,cooldown,
                 connect_delay,connect_group_size,
                 debug == 1 ? "on" : "off");
@@ -397,11 +414,13 @@ int main(int argc, char * argv[])
         if(!should_test_range && ((i+1) != n_fakeswitches)) // only if testing range or this is last
             continue;
         for( j = 0; j < tests_per_loop; j ++) {
+            for (int k = 0; k <= i; k++)
+                fakeswitch_reset_packets(&fakeswitches[k], packets_to_process);
             if ( j > 0 )
                 delay = 0;      // only delay on the first run
             v = 1000.0 * run_test(i+1, fakeswitches, mstestlen, delay);
             results[j] = v;
-			if(j<warmup || j >= tests_per_loop-cooldown) 
+			if(j<warmup || j >= tests_per_loop-cooldown)
 				continue;
             sum += v;
             if (v > max)
@@ -429,4 +448,3 @@ int main(int argc, char * argv[])
 
     return 0;
 }
-
